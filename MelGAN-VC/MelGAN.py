@@ -28,8 +28,6 @@ from torch.utils.data import Dataset, DataLoader
 
 from tensordot_pytorch import tensordot_pytorch
 
-print("HERE")
-
 #Hyperparameters
 
 hop=192               #hop size (window size = 6*hop)
@@ -224,15 +222,14 @@ def splitcut(data):
 #MALE1
 awv = audio_array('./cmu_us_clb_arctic/wav')   #get waveform array from folder containing wav files
 aspec = tospec(awv)         #get spectrogram array
+print("aspec shape: ", aspec.shape)
 adata = splitcut(aspec)     #split spectrogams to fixed length
+print("adata shape: ", adata.shape)
 #FEMALE1
 bwv = audio_array('./cmu_us_bdl_arctic/wav')
 bspec = tospec(bwv)
 bdata = splitcut(bspec)
 
-
-a_loader = DataLoader(adata,batch_size=16,shuffle=True)
-b_loader = DataLoader(bdata,batch_size=16,shuffle=True,)
 # #MALE2
 # awv = audio_array('../content/cmu_us_rms_arctic/wav')
 # aspec = tospec(awv)
@@ -252,14 +249,22 @@ b_loader = DataLoader(bdata,batch_size=16,shuffle=True,)
 # bdata = splitcut(bspec)
 
 class AudioDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, data, hop, shape):
+        self.data = torch.Tensor(data).permute(0,3,1,2)
+        self.hop = hop 
+        self.shape = shape
         
     def __getitem__(self, idx):
-        return {'x_data': data[idx]}
+        return self.data[idx,:,:,:3*self.shape]
         
     def __len__(self):
         return len(self.data)
+
+a_dataset = AudioDataset(adata, hop=hop, shape=shape)
+a_loader = DataLoader(dataset=a_dataset,batch_size=16,shuffle=True)
+
+b_dataset = AudioDataset(bdata, hop=hop, shape=shape)
+b_loader = DataLoader(dataset=b_dataset,batch_size=16,shuffle=True)
     
 class ConvSN2D(nn.Conv2d):
     def __init__(self, in_channels, filters, kernel_size, strides, padding='same', power_iterations=1):
@@ -267,7 +272,8 @@ class ConvSN2D(nn.Conv2d):
         self.power_iterations = power_iterations
         self.strides = strides
         self.padding = padding
-        print("WEIGHT SHAPE:",self.weight.shape)
+        self.filters = filters
+        self.kernel_size = kernel_size
         
         self.u = torch.nn.Parameter(data=torch.zeros((1,self.weight.shape[-1]))
                                          ,requires_grad=False)
@@ -276,16 +282,12 @@ class ConvSN2D(nn.Conv2d):
     
     def compute_spectral_norm(self, W, new_u, W_shape):
         for _ in range(self.power_iterations):
-            print("U:", new_u.shape)
-            # print("V:", new_v.shape)
-            print("W:", W.shape)
             new_v = F.normalize(torch.matmul(new_u, torch.transpose(W,0,1)), p=2)
             new_u = F.normalize(torch.matmul(new_v, W), p=2)
             # new_v = l2normalize(torch.matmul(new_u, torch.transpose(W)))
             # new_u = l2normalize(torch.matmul(new_v, W))
             
         sigma = torch.matmul(W, torch.transpose(new_u,0,1))
-        print("SIGMA SHAPE:",sigma.shape)
         W_bar = W/sigma
 
         self.u = torch.nn.Parameter(data=new_u)
@@ -295,85 +297,42 @@ class ConvSN2D(nn.Conv2d):
     
     def forward(self, inputs):
         W_shape = self.weight.shape
-        print("W SHAPE FORWARD:",W_shape)
         W_reshaped = self.weight.reshape((-1, W_shape[-1]))
-        print("W RESHAPED:", W_reshaped.shape)
         new_kernel = self.compute_spectral_norm(W_reshaped, self.u, W_shape)
-        outputs = F.conv2d(inputs, new_kernel, stride=self.strides, padding=0)
+        
+        if self.padding == 'same':
+            stride_h, stride_w = self.strides if isinstance(self.strides, tuple) else [self.strides, self.strides]
+            pad_h = ((inputs.shape[2]-1)*stride_h - inputs.shape[2] + self.kernel_size[0]) // 2
+            pad_w = ((inputs.shape[3]-1)*stride_w - inputs.shape[3] + self.kernel_size[1]) // 2
+        else:
+            pad_h, pad_w = 0, 0
+
+        outputs = F.conv2d(inputs, new_kernel, stride=self.strides, padding=(pad_h, pad_w))
 
         # CODE TO ADD BIAS AND ACTIVATION FN HERE
 
         return outputs
     
-class ConvSN2DTranspose(nn.Conv2d):
-    def __init__(self, in_channels, filters, kernel_size, power_iterations=1, strides=2, padding='same'):
+class ConvSN2DTranspose(nn.ConvTranspose2d):
+    def __init__(self, in_channels, filters, kernel_size, power_iterations=1, strides=2, padding='valid'):
         super(ConvSN2DTranspose, self).__init__(in_channels=in_channels, out_channels=filters, kernel_size=kernel_size, stride=strides, padding=padding)
         self.power_iterations = power_iterations
         self.strides = strides
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.padding=padding
         
         self.u = torch.nn.Parameter(data=torch.zeros((1,self.weight.shape[-1]))
                                          ,requires_grad=False)
         
         self.u.data.uniform_(0, 1)
-        
-    def deconv_output_length(self,input_length,
-                         filter_size,
-                         padding,
-                         output_padding=None,
-                         stride=0,
-                         dilation=1):
-        """Determines output length of a transposed convolution given input length.
-        Arguments:
-          input_length: Integer.
-          filter_size: Integer.
-          padding: one of `"same"`, `"valid"`, `"full"`.
-          output_padding: Integer, amount of padding along the output dimension. Can
-            be set to `None` in which case the output length is inferred.
-          stride: Integer.
-          dilation: Integer.
-        Returns:
-          The output length (integer).
-        """
-        assert padding in {'same', 'valid', 'full'}
-        if input_length is None:
-            return None
-
-        # Get the dilated kernel size
-        filter_size = filter_size + (filter_size - 1) * (dilation - 1)
-
-        # Infer length if output padding is None, else compute the exact length
-        if output_padding is None:
-            if padding == 'valid':
-                length = input_length * stride + max(filter_size - stride, 0)
-            elif padding == 'full':
-                length = input_length * stride - (stride + filter_size - 2)
-            elif padding == 'same':
-                length = input_length * stride
-
-        else:
-            if padding == 'same':
-                pad = filter_size // 2
-            elif padding == 'valid':
-                pad = 0
-            elif padding == 'full':
-                pad = filter_size - 1
-
-        length = ((input_length - 1) * stride + filter_size - 2 * pad +
-                  output_padding)
-        return length
     
     def compute_spectral_norm(self, W, new_u, W_shape):
         for _ in range(self.power_iterations):
-            print("U:", new_u.shape)
-            # print("V:", new_v.shape)
-            print("W:", W.shape)
             new_v = F.normalize(torch.matmul(new_u, torch.transpose(W,0,1)), p=2)
             new_u = F.normalize(torch.matmul(new_v, W), p=2)
-            # new_v = l2normalize(torch.matmul(new_u, torch.transpose(W)))
-            # new_u = l2normalize(torch.matmul(new_v, W))
             
         sigma = torch.matmul(W, torch.transpose(new_u,0,1))
-        print("SIGMA SHAPE:",sigma.shape)
         W_bar = W/sigma
 
         self.u = torch.nn.Parameter(data=new_u)
@@ -384,44 +343,28 @@ class ConvSN2DTranspose(nn.Conv2d):
     def forward(self, inputs):
 
         W_shape = self.weight.shape
-        print("W SHAPE FORWARD:",W_shape)
         W_reshaped = self.weight.reshape((-1, W_shape[-1]))
-        print("W RESHAPED:", W_reshaped.shape)
         new_kernel = self.compute_spectral_norm(W_reshaped, self.u, W_shape)
-        # outputs = F.conv2d(inputs, new_kernel, stride=self.strides, padding=0)
-
-
-        # W_shape = self.weight.shape[-2:]
-        # W_reshaped = self.weight[-2:].reshape((-1, W_shape[-1]))
-        # new_kernel = self.compute_spectral_norm(W_reshaped, self.u, W_shape)
         
         batch_size = inputs.shape[0]
         height, width = inputs.shape[2], inputs.shape[3]
         
         kernel_h, kernel_w = self.weight.shape[-2:]
-        stride_h, stride_w = self.strides
 
-        out_pad_h = out_pad_w = None
-        padding = "full"
-        
-        out_height = self.deconv_output_length(height,
-                                            kernel_h,
-                                            padding=self.padding,
-                                            output_padding=out_pad_h,
-                                            stride=stride_h)
-        out_width = self.deconv_output_length(width,
-                                            kernel_w,
-                                            padding=self.padding,
-                                            output_padding=out_pad_w,
-                                            stride=stride_w)
-        
-        output_shape = (batch_size, self.filters, out_height, out_width)
-
+        if self.padding == 'same':
+            stride_h, stride_w = self.strides if isinstance(self.strides, tuple) else [self.strides, self.strides]
+            pad_h = ((inputs.shape[2]-1)*stride_h - 192 + self.kernel_size[0]) // 2
+            pad_w = ((inputs.shape[3]-1)*stride_w - 24 + self.kernel_size[1]) // 2
+            #Here we are very cheekily forcing output shape...
+        else:
+            pad_h, pad_w = 0, 0
+        print("PAD W : ", pad_w)
         outputs = F.conv_transpose2d(
             inputs,
             new_kernel,
             None,
-            strides=self.strides)
+            stride=self.strides,
+            padding=(pad_h,pad_w))
 
         # CODE FOR BIAS AND ACTIVATION FN HERE  
 
@@ -437,17 +380,10 @@ class DenseSN(nn.Linear):
         self.u.data.uniform_(0, 1)
     
     def compute_spectral_norm(self, W, new_u, W_shape):
-        for _ in range(self.power_iterations):
-            print("U:", new_u.shape)
-            # print("V:", new_v.shape)
-            print("W:", W.shape)
-            new_v = F.normalize(torch.matmul(new_u, torch.transpose(W,0,1)), p=2)
-            new_u = F.normalize(torch.matmul(new_v, W), p=2)
-            # new_v = l2normalize(torch.matmul(new_u, torch.transpose(W)))
-            # new_u = l2normalize(torch.matmul(new_v, W))
+        new_v = F.normalize(torch.matmul(new_u, torch.transpose(W,0,1)), p=2)
+        new_u = F.normalize(torch.matmul(new_v, W), p=2)
             
         sigma = torch.matmul(W, torch.transpose(new_u,0,1))
-        print("SIGMA SHAPE:",sigma.shape)
         W_bar = W/sigma
 
         self.u = torch.nn.Parameter(data=new_u)
@@ -457,9 +393,7 @@ class DenseSN(nn.Linear):
     
     def forward(self, inputs):
         W_shape = self.weight.shape
-        print("W SHAPE FORWARD:",W_shape)
         W_reshaped = self.weight.reshape((-1, W_shape[-1]))
-        print("W RESHAPED:", W_reshaped.shape)
         new_kernel = self.compute_spectral_norm(W_reshaped, self.u, W_shape)
         
         rank = len(inputs.shape)
@@ -468,36 +402,27 @@ class DenseSN(nn.Linear):
             #Thanks to deanmark on GitHub for pytorch tensordot function
             outputs = tensordot_pytorch(inputs, new_kernel, [[rank-1],[0]])
         else:
-            outputs = torch.matmul(outputs, new_kernel)
+            outputs = torch.matmul(inputs, torch.transpose(new_kernel,0,1))
             
         # CODE FOR BIAS AND ACTIVATION FN HERE 
         return outputs
 
 #Extract function: splitting spectrograms
 def extract_image(im):
-    im = im.permute(0,3,1,2)
     shape = im.shape
-    print("SHAPE:",shape)
     height = shape[2]
     width = shape[3]
-    im1 = im[:][:][:][0:width - (2)*width // 3]
-    im2 = im[:][:][:][width//3:width-(width//3)]
-    im3 = im[:][:][:][(2*width//3):width]
-    print("im1:",im1.shape)
-    print("im2:",im2.shape)
-    print("im3:",im3.shape)
 
+    im1 = im[:,:,:, 0:(width - (2*width//3))]
+    im2 = im[:,:,:, width//3:(width-(width//3))]
+    im3 = im[:,:,:,(2*width//3):width]
 
-    # print("CROP:", im.shape)
-    # im1 = Cropping2D(((0,0), (0, 2*(im.shape[2]//3))))(im)
-    # im2 = Cropping2D(((0,0), (im.shape[2]//3,im.shape[2]//3)))(im)
-    # im3 = Cropping2D(((0,0), (2*(im.shape[2]//3), 0)))(im)
     return im1,im2,im3
 
 #Assemble function: concatenating spectrograms
 def assemble_image(lsim):
     im1,im2,im3 = lsim
-    imh = Concatenate(2)([im1,im2,im3])
+    imh = torch.cat((im1,im2,im3),dim=3)
     return imh
 
 class Generator(nn.Module):
@@ -505,12 +430,12 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         
         h, w, c = input_shape
-        print("H:",h)
-        print("W:",w)
-        print("C:",c)
+        #print("H:",h)
+        #print("W:",w)
+        #("C:",c)
         
         #downscaling
-        self.g0 = nn.ConstantPad2d((0,1), 0)
+        #self.g0 = nn.ConstantPad2d((0,1), 0)
         self.g1 = ConvSN2D(in_channels=c, filters=256, kernel_size=(h,3), strides=1, padding='valid')
         self.g2 = ConvSN2D(in_channels=256, filters=256, kernel_size=(1,9), strides=(1,2))
         self.g3 = ConvSN2D(in_channels=256, filters=256, kernel_size=(1,7), strides=(1,2))
@@ -519,24 +444,27 @@ class Generator(nn.Module):
         self.g4 = ConvSN2D(in_channels=256, filters=256, kernel_size=(1,7), strides=(1,1))
         self.g5 = ConvSN2D(in_channels=256, filters=256, kernel_size=(1,9), strides=(1,1))
         
-        self.g6 = ConvSN2DTranspose(in_channels=256, filters=1, kernel_size=(h,1), strides=(1,1), padding='valid')
+        self.g6 = ConvSN2DTranspose(in_channels=256, filters=1, kernel_size=(h,2), strides=(1,1), padding='same')
     
     def forward(self, x):
         #NOTE: YET TO IMPLEMENT BATCH NORM, ACTIVATION FUNCTIONS, RELU ETC
         #downscaling
-        x = self.g0(x)
-        x = self.g1(x)
-        x = self.g2(x)
-        x = self.g3(x)
+        #x = self.g0(x)
+        x1 = self.g1(x)
+        x2 = self.g2(x1)        
+        x3 = self.g3(x2)
         
         #upscaling
-        print("BEFORE UPSAMPLE X:",x.shape)
-        x = F.interpolate(x, size=(x.shape[2],x.shape[3] * 2))
-        print("AFTER UPSAMPLE X:",x.shape)
-        x = self.g4(x)
+        x4 = F.interpolate(x3, size=(x3.shape[2],x3.shape[3] * 2))
+        x = self.g4(x4)
+        x = torch.cat((x, x3), dim=3)
+
         x = F.interpolate(x, size=(x.shape[2],x.shape[3] * 2))
         x = self.g5(x)
+        x = torch.cat((x,x2),dim=3)
+
         x = self.g6(x)
+
         return x
         
 #torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, 
@@ -548,16 +476,31 @@ class Siamese(nn.Module):
         
         h, w, c = input_shape
         
-        self.g1 = nn.Conv2d(in_channels=c, out_channels=256, kernel_size=(h,9), stride=1, padding='valid')
+        self.g1 = nn.Conv2d(in_channels=c, out_channels=256, kernel_size=(h,9), stride=1, padding=0)
         self.g2 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(1,9), stride=(1,2))
         self.g3 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(1,7), stride=(1,2))
-        self.g4 = nn.Linear(256, 128)
+        self.g4 = nn.Linear(1536, 128)
             
     def forward(self, x):
+        #We have to define layers on the fly in order to ensure 'same' padding
+
         x = self.g1(x)
+
+        #New stride = (1,2)
+        #New kernel = (1,9)
+        pad_h = ((x.shape[2]-1)*1 - x.shape[2] + 1) // 2
+        pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 9) // 2
+        x = F.pad(x, (pad_h, pad_w))
         x = self.g2(x)
+
+        #New stride = (1,2)
+        #New kernel = (1,7)
+        pad_h = ((x.shape[2]-1)*1 - x.shape[2] + 1) // 2
+        pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 7) // 2
+        x = F.pad(x, (pad_h, pad_w))
         x = self.g3(x)
-        x = self.g4(x.flatten())
+
+        x = self.g4(x.view(x.shape[0],-1))
         return x
     
 class Discriminator(nn.Module):
@@ -569,13 +512,13 @@ class Discriminator(nn.Module):
         self.g1 = ConvSN2D(in_channels=c, filters=512, kernel_size=(h,3), strides=1, padding='valid')
         self.g2 = ConvSN2D(in_channels=512, filters=512, kernel_size=(1,9), strides=(1,2))
         self.g3 = ConvSN2D(in_channels=512, filters=512, kernel_size=(1,7), strides=(1,2))
-        self.g4 = DenseSN(input_shape=1)
+        self.g4 = DenseSN(input_shape=35328)
         
     def forward(self, x):
         x = self.g1(x)
         x = self.g2(x)
         x = self.g3(x)
-        x = self.g4(x.flatten())
+        x = self.g4(x.view(x.shape[0],-1))
         return x   
 
 #Generate a random batch to display current training results
@@ -600,7 +543,6 @@ def testgena():
 #Show results mid-training
 def save_test_image_full(path):
     a = testgena()
-    print(a.shape)
     ab = gen(a, training=False)
     ab = testass(ab)
     a = testass(a)
@@ -622,38 +564,37 @@ def save_test_image_full(path):
 
 def mae(x,y):
     loss_REC_mean = nn.MSELoss(reduction='mean')
-    return loss_REC_mean(torch.abs(x-y))
+    #return loss_REC_mean(torch.abs(x-y))
+    return loss_REC_mean(x, y)
 
 def mse(x,y):
-    loss_REC_mean = nn.MSELoss(reduction='mean')
-    return loss_REC_mean((x-y)**2)
+    return loss_REC_mean(x,y)
 
 def loss_travel(sa,sab,sa1,sab1):
-    loss_REC = nn.MSELoss(reduction='sum')
-    loss_REC_mean = nn.MSELoss(reduction='mean')
+    #l1 = loss_REC_mean(((sa-sa1) - (sab-sab1))**2)
+    #l2 = loss_REC_mean(loss_REC(-(torch.norm(sa-sa1, axis=[-1]) * torch.norm(sab-sab1, axis=[-1])), axis=-1))
     
-    l1 = loss_REC_mean(((sa-sa1) - (sab-sab1))**2)
-    l2 = loss_REC_mean(loss_REC(-(torch.norm(sa-sa1, axis=[-1]) * torch.norm(sab-sab1, axis=[-1])), axis=-1))
+    #Recreate in PyTorch
+    cos = nn.CosineSimilarity(dim=-1, eps=1e-6)
+    l1 = cos((sa-sa1), (sab-sab1))
+    print("l1 shape :", l1.shape)
+    l2 = F.normalize((sa-sa1) - (sab-sab1), p=2).mean(axis=1)
+    print("l2 shape: ", l2.shape)
     return l1 + l2
 
 def loss_siamese(sa,sa1):
-    loss_REC = nn.MSELoss(reduction='sum')
-    loss_REC_mean = nn.MSELoss(reduction='mean')
-    
-    logits = torch.sqrt(loss_REC((sa-sa1)**2, axis=-1, keepdims=True))
-    return loss_REC_mean(tf.square(torch.max((delta - logits), 0)))
+    logits = torch.sqrt(((sa-sa1)**2).sum(1))
+    logits_max = torch.Tensor(torch.max((delta - logits), 0))
+    return torch.pow(logits_max, 2.).mean(axis=-1)
 
 def d_loss_f(fake):
-    loss_REC_mean = nn.MSELoss(reduction='mean')
-    return loss_REC_mean(torch.max(1 + fake, 0))
+    return torch.Tensor(torch.max(1 + fake, 0)).mean(axis=-1)
 
 def d_loss_r(real):
-    loss_REC_mean = nn.MSELoss(reduction='mean')
-    return loss_REC_mean(torch.max(1 - real, 0))
+    return torch.Tensor(torch.max(1 - real, 0)).mean(axis=-1)
 
 def g_loss_f(fake):
-    loss_REC_mean = nn.MSELoss(reduction='mean')
-    return loss_REC_mean(- fake)
+    return torch.Tensor(-fake).mean(axis=-1)
 
 #=======SET UP MODELS AND OPTIMIZERS =======#
 gen = Generator((hop,shape,1))
@@ -674,10 +615,8 @@ def update_lr(lr):
 #functions to be written here
 def train_all(a,b):
     #splitting spectrogram in 3 parts
-    
     aa,aa2,aa3 = extract_image(a) 
     
-    print("AA:", aa.shape)
     bb,bb2,bb3 = extract_image(b)
 
     gen.zero_grad()
@@ -693,9 +632,9 @@ def train_all(a,b):
     fab3 = gen.forward(aa3)
     
     #identity mapping B to B  COMMENT THESE 3 LINES IF THE IDENTITY LOSS TERM IS NOT NEEDED
-    fid = gen.forward(bb)
-    fid2 = gen.forward(bb2)
-    fid3 = gen.forward(bb3)
+    #fid = gen.forward(bb)
+    #fid2 = gen.forward(bb2)
+    #fid3 = gen.forward(bb3)
     
     #concatenate/assemble converted spectrograms
     fabtot = assemble_image([fab,fab2,fab3])
@@ -703,6 +642,7 @@ def train_all(a,b):
     #feed concatenated spectrograms to critic
     cab = critic.forward(fabtot)
     cb = critic.forward(b)
+
     #feed 2 pairs (A,G(A)) extracted spectrograms to Siamese
     sab = siam.forward(fab)
     sab2 = siam.forward(fab3)
@@ -710,14 +650,16 @@ def train_all(a,b):
     sa2 = siam.forward(aa3)
 
     #identity mapping loss
-    loss_id = (mae(bb,fid)+mae(bb2,fid2)+mae(bb3,fid3))/3.      #loss_id = 0. IF THE IDENTITY LOSS TERM IS NOT NEEDED
+    #loss_id = (mae(bb,fid)+mae(bb2,fid2)+mae(bb3,fid3))/3.      #loss_id = 0. IF THE IDENTITY LOSS TERM IS NOT NEEDED
     #travel loss
     loss_m = loss_travel(sa,sab,sa2,sab2)+loss_siamese(sa,sa2)
-    
+    print("Loss m: ", loss_m)
     #get gen and siam loss and bptt
     loss_g = g_loss_f(cab)
-    lossgtot = loss_g+10.*loss_m+0.5*loss_id #CHANGE LOSS WEIGHTS HERE  (COMMENT OUT +w*loss_id IF THE IDENTITY LOSS TERM IS NOT NEEDED)
-    losssgtot.backward()
+    print("Loss g: ", loss_g)
+    lossgtot = loss_g+10.*loss_m #+0.5*loss_id #CHANGE LOSS WEIGHTS HERE  (COMMENT OUT +w*loss_id IF THE IDENTITY LOSS TERM IS NOT NEEDED)
+
+    lossgtot.backward()
     opt_gen.step()
     
     #get critic loss and bptt
@@ -831,21 +773,16 @@ def chopspec(spec):
 #Converting from source Spectrogram to target Spectrogram
 def towave(spec, name, path='../content/', show=False):
     specarr = chopspec(spec)
-    print(specarr.shape)
     a = specarr
-    print('Generating...')
     ab = gen(a, training=False)
-    print('Assembling and Converting...')
     a = specass(a,spec)
     ab = specass(ab,spec)
     awv = deprep(a)
     abwv = deprep(ab)
-    print('Saving...')
     pathfin = f'{path}/{name}'
     os.mkdir(pathfin)
     sf.write(pathfin+'/AB.wav', abwv, sr)
     sf.write(pathfin+'/A.wav', awv, sr)
-    print('Saved WAV!')
     IPython.display.display(IPython.display.Audio(np.squeeze(abwv), rate=sr))
     IPython.display.display(IPython.display.Audio(np.squeeze(awv), rate=sr))
     if show:
