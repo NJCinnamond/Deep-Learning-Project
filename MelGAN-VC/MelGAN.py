@@ -565,15 +565,17 @@ def save_test_image_full(path):
 def mae(x,y):
     loss_REC_mean = nn.MSELoss(reduction='mean')
     #return loss_REC_mean(torch.abs(x-y))
-    return loss_REC_mean(x, y)
+    return torch.mean(torch.abs(x - y))
+    # return loss_REC_mean(x, y)
 
 def mse(x,y):
-    return loss_REC_mean(x,y)
+    return torch.mean((x-y)**2)
 
 def loss_travel(sa,sab,sa1,sab1):
     #l1 = loss_REC_mean(((sa-sa1) - (sab-sab1))**2)
     #l2 = loss_REC_mean(loss_REC(-(torch.norm(sa-sa1, axis=[-1]) * torch.norm(sab-sab1, axis=[-1])), axis=-1))
-    
+    # l1 = torch.mean(((sa-sa1) - (sab-sab1))**2)
+    # l2 = torch.mean(torch.sum(-(torch.norm(sa-sa1,2,-1) * torch.norm(sab-sab1,2,-1)), -1))
     #Recreate in PyTorch
     cos = nn.CosineSimilarity(dim=-1, eps=1e-6)
     l1 = cos((sa-sa1), (sab-sab1))
@@ -584,17 +586,20 @@ def loss_travel(sa,sab,sa1,sab1):
 
 def loss_siamese(sa,sa1):
     logits = torch.sqrt(((sa-sa1)**2).sum(1))
-    logits_max = torch.Tensor(torch.max((delta - logits), 0))
+    logits_max = torch.tensor(torch.max((delta - logits), 0),requires_grad=True)
     return torch.pow(logits_max, 2.).mean(axis=-1)
 
 def d_loss_f(fake):
-    return torch.Tensor(torch.max(1 + fake, 0)).mean(axis=-1)
+    tensor = torch.tensor(torch.max(1 + fake, 0),requires_grad=True)
+    return tensor.mean(-1)
 
 def d_loss_r(real):
-    return torch.Tensor(torch.max(1 - real, 0)).mean(axis=-1)
+    tensor = torch.tensor(torch.max(1 - real, 0),requires_grad=True)
+    return tensor.mean(-1)
 
 def g_loss_f(fake):
-    return torch.Tensor(-fake).mean(axis=-1)
+    tensor = torch.tensor(-fake,requires_grad=True)
+    return tensor.mean(-1)
 
 #=======SET UP MODELS AND OPTIMIZERS =======#
 gen = Generator((hop,shape,1))
@@ -659,17 +664,18 @@ def train_all(a,b):
     print("Loss g: ", loss_g)
     lossgtot = loss_g+10.*loss_m #+0.5*loss_id #CHANGE LOSS WEIGHTS HERE  (COMMENT OUT +w*loss_id IF THE IDENTITY LOSS TERM IS NOT NEEDED)
 
-    lossgtot.backward()
+    lossgtot.mean().backward()
     opt_gen.step()
     
     #get critic loss and bptt
     loss_dr = d_loss_r(cb)
     loss_df = d_loss_f(cab)
     loss_d = (loss_dr+loss_df)/2.
+    # loss_d = torch.autograd.Variable(loss_d, requires_grad = True)
     loss_d.backward()
     opt_disc.step()
     
-    return loss_dr,loss_df,loss_g,loss_id
+    return loss_dr,loss_df,loss_g,loss_d
 
 def train_d(a,b):
     opt_disc.zero_grad()
@@ -691,9 +697,10 @@ def train_d(a,b):
     loss_dr = d_loss_r(cb)
     loss_df = d_loss_f(cab)
     loss_d = (loss_dr+loss_df)/2.
+    # loss_d = torch.autograd.Variable(loss_d, requires_grad = True)
     
     loss_d.backward()
-    opt_dis.step()
+    opt_disc.step()
 
     return loss_dr,loss_df
 
@@ -723,11 +730,11 @@ def train(epochs, batch_size=16, lr=0.0001, n_save=6, gupt=5):
             g += 1
 
             if batchi%600==0:
-                print(f'[Epoch {epoch}/{epochs}] [Batch {batchi}] [D loss f: {np.mean(df_list[-g:], axis=0)} ', end='')
-                print(f'r: {np.mean(dr_list[-g:], axis=0)}] ', end='')
-                print(f'[G loss: {np.mean(g_list[-g:], axis=0)}] ', end='')
-                print(f'[ID loss: {np.mean(id_list[-g:])}] ', end='')
-                print(f'[LR: {lr}]')
+                # print(f'[Epoch {epoch}/{epochs}] [Batch {batchi}] [D loss f: {np.mean(df_list[-g:], axis=0)} ', end='')
+                # print(f'r: {np.mean(dr_list[-g:], axis=0)}] ', end='')
+                # print(f'[G loss: {np.mean(g_list[-g:], axis=0)}] ', end='')
+                # print(f'[ID loss: {np.mean(id_list[-g:])}] ', end='')
+                # print(f'[LR: {lr}]')
                 g = 0
             nbatch=batchi
 
