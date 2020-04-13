@@ -142,7 +142,6 @@ def tospec(data):
         S=prep(x)
         S = np.array(S, dtype=np.float32)
         specs[i]=np.expand_dims(S, -1)
-    print(specs.shape)
     return specs
 
 #Generate multiple spectrograms with a determined length from single wav file
@@ -165,7 +164,6 @@ def tospeclong(path, length=4*16000):
             specs[i]=S
         except AttributeError:
             print('spectrogram failed')
-    print(specs.shape)
     return specs
 
 #Waveform array from path of folder containing wav files
@@ -358,7 +356,7 @@ class ConvSN2DTranspose(nn.ConvTranspose2d):
             #Here we are very cheekily forcing output shape...
         else:
             pad_h, pad_w = 0, 0
-        print("PAD W : ", pad_w)
+
         outputs = F.conv_transpose2d(
             inputs,
             new_kernel,
@@ -367,7 +365,6 @@ class ConvSN2DTranspose(nn.ConvTranspose2d):
             padding=(pad_h,pad_w))
 
         # CODE FOR BIAS AND ACTIVATION FN HERE  
-
         return outputs
     
 class DenseSN(nn.Linear):
@@ -430,9 +427,9 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         
         h, w, c = input_shape
-        #print("H:",h)
-        #print("W:",w)
-        #("C:",c)
+
+        self.leaky = nn.LeakyReLU(0.2, inplace=True)
+        self.batchnorm = nn.BatchNorm2d(num_features=256)
         
         #downscaling
         #self.g0 = nn.ConstantPad2d((0,1), 0)
@@ -451,19 +448,24 @@ class Generator(nn.Module):
         #downscaling
         #x = self.g0(x)
         x1 = self.g1(x)
-        x2 = self.g2(x1)        
+        x1 = self.leaky(self.batchnorm(x1))
+        x2 = self.g2(x1)   
+        x2 = self.leaky(self.batchnorm(x2))   
         x3 = self.g3(x2)
+        x3 = self.leaky(self.batchnorm(x3))
         
         #upscaling
         x4 = F.interpolate(x3, size=(x3.shape[2],x3.shape[3] * 2))
         x = self.g4(x4)
+        x = self.leaky(self.batchnorm(x))
         x = torch.cat((x, x3), dim=3)
 
         x = F.interpolate(x, size=(x.shape[2],x.shape[3] * 2))
         x = self.g5(x)
+        x = self.leaky(x)
         x = torch.cat((x,x2),dim=3)
 
-        x = self.g6(x)
+        x = torch.tanh(self.g6(x))
 
         return x
         
@@ -475,7 +477,9 @@ class Siamese(nn.Module):
         super(Siamese, self).__init__()
         
         h, w, c = input_shape
-        
+        self.leaky = nn.LeakyReLU(0.2, inplace=True)
+        self.batchnorm = nn.BatchNorm2d(num_features=256)
+
         self.g1 = nn.Conv2d(in_channels=c, out_channels=256, kernel_size=(h,9), stride=1, padding=0)
         self.g2 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(1,9), stride=(1,2))
         self.g3 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(1,7), stride=(1,2))
@@ -485,6 +489,7 @@ class Siamese(nn.Module):
         #We have to define layers on the fly in order to ensure 'same' padding
 
         x = self.g1(x)
+        x = self.leaky(self.batchnorm(x))
 
         #New stride = (1,2)
         #New kernel = (1,9)
@@ -492,6 +497,7 @@ class Siamese(nn.Module):
         pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 9) // 2
         x = F.pad(x, (pad_h, pad_w))
         x = self.g2(x)
+        x = self.leaky(self.batchnorm(x))
 
         #New stride = (1,2)
         #New kernel = (1,7)
@@ -499,6 +505,7 @@ class Siamese(nn.Module):
         pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 7) // 2
         x = F.pad(x, (pad_h, pad_w))
         x = self.g3(x)
+        x = self.leaky(self.batchnorm(x))
 
         x = self.g4(x.view(x.shape[0],-1))
         return x
@@ -509,6 +516,8 @@ class Discriminator(nn.Module):
         
         h, w, c = input_shape
         
+        self.leaky = nn.LeakyReLU(0.2, inplace=True)
+
         self.g1 = ConvSN2D(in_channels=c, filters=512, kernel_size=(h,3), strides=1, padding='valid')
         self.g2 = ConvSN2D(in_channels=512, filters=512, kernel_size=(1,9), strides=(1,2))
         self.g3 = ConvSN2D(in_channels=512, filters=512, kernel_size=(1,7), strides=(1,2))
@@ -516,8 +525,11 @@ class Discriminator(nn.Module):
         
     def forward(self, x):
         x = self.g1(x)
+        x = self.leaky(x)
         x = self.g2(x)
+        x = self.leaky(x)
         x = self.g3(x)
+        x = self.leaky(x)
         x = self.g4(x.view(x.shape[0],-1))
         return x   
 
