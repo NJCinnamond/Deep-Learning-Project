@@ -750,12 +750,9 @@ def train(epochs, batch_size=16, lr=0.0001, n_save=6, gupt=5):
                 g = 0
             nbatch=batchi
 
-        print(f'Time/Batch {(time.time()-bef)/nbatch}')
-        save_end(epoch,np.mean(g_list[-n_save*c:], axis=0),np.mean(df_list[-n_save*c:], axis=0),np.mean(id_list[-n_save*c:], axis=0),n_save=n_save)
-        print(f'Mean D loss: {np.mean(df_list[-c:], axis=0)} Mean G loss: {np.mean(g_list[-c:], axis=0)} Mean ID loss: {np.mean(id_list[-c:], axis=0)}')
         c = 0
         
-train(5000, batch_size=bs, lr=0.0002, n_save=1, gupt=3)
+train(20, batch_size=bs, lr=0.002, n_save=1, gupt=3)
 
 #After Training, use these functions to convert data with the generator and save the results
 
@@ -826,4 +823,4 @@ plt.imshow(np.flip(speca, axis=0), cmap=None)
 plt.axis('off')
 plt.show()
 
-abwv = towave(speca, name='FILENAME1', path='../content/')           #Convert and save wav
+abwv = towave(speca, name='FILENAME1', path='')           #Convert and save wav
