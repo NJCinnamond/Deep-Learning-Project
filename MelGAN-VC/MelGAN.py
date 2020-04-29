@@ -29,6 +29,8 @@ from torch.utils.data import Dataset, DataLoader
 
 from tensordot_pytorch import tensordot_pytorch
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 #Hyperparameters
 
 hop=192               #hop size (window size = 6*hop)
@@ -77,12 +79,12 @@ def spectral_convergence(input, target):
 
 def GRAD(spec, transform_fn, samples=None, init_x0=None, maxiter=1000, tol=1e-6, verbose=1, evaiter=10, lr=0.003):
 
-    spec = torch.Tensor(spec)
+    spec = torch.Tensor(spec).to(device)
     samples = (spec.shape[-1]*hop)-hop
 
     if init_x0 is None:
-        init_x0 = spec.new_empty((1,samples)).normal_(std=1e-6)
-    x = nn.Parameter(init_x0)
+        init_x0 = spec.new_empty((1,samples)).normal_(std=1e-6).to(device)
+    x = nn.Parameter(init_x0).to(device)
     T = spec
 
     criterion = nn.L1Loss()
@@ -251,7 +253,7 @@ class AudioDataset(Dataset):
         self.shape = shape
         
     def __getitem__(self, idx):
-        return self.data[idx,:,:,:3*self.shape]
+        return self.data[idx,:,:,:3*self.shape].to(device)
         
     def __len__(self):
         return len(self.data)
@@ -446,16 +448,16 @@ class Generator(nn.Module):
         #downscaling
         #x = self.g0(x)
         x1 = self.g1(x)
-        x1 = self.leaky(self.batchnorm(x1))
+        x1 = self.batchnorm(self.leaky(x1))
         x2 = self.g2(x1)   
-        x2 = self.leaky(self.batchnorm(x2))   
+        x2 = self.batchnorm(self.leaky(x2))   
         x3 = self.g3(x2)
-        x3 = self.leaky(self.batchnorm(x3))
+        x3 = self.batchnorm(self.leaky(x3))
         
         #upscaling
         x4 = F.interpolate(x3, size=(x3.shape[2],x3.shape[3] * 2))
         x = self.g4(x4)
-        x = self.leaky(self.batchnorm(x))
+        x = self.batchnorm(self.leaky(x))
         x = torch.cat((x, x3), dim=3)
 
         x = F.interpolate(x, size=(x.shape[2],x.shape[3] * 2))
@@ -487,7 +489,7 @@ class Siamese(nn.Module):
         #We have to define layers on the fly in order to ensure 'same' padding
 
         x = self.g1(x)
-        x = self.leaky(self.batchnorm(x))
+        x = self.batchnorm(self.leaky(x))
 
         #New stride = (1,2)
         #New kernel = (1,9)
@@ -499,7 +501,7 @@ class Siamese(nn.Module):
         x = F.pad(x, (pad_h, pad_w))
         print(x.shape)
         x = self.g2(x)
-        x = self.leaky(self.batchnorm(x))
+        x = self.batchnorm(self.leaky(x))
 
         #New stride = (1,2)
         #New kernel = (1,7)
@@ -511,7 +513,7 @@ class Siamese(nn.Module):
         x = F.pad(x, (pad_h, pad_w))
         print(x.shape)
         x = self.g3(x)
-        x = self.leaky(self.batchnorm(x))
+        x = self.batchnorm(self.leaky(x))
 
         x = self.g4(x.view(x.shape[0],-1))
         return x
@@ -611,20 +613,20 @@ def g_loss_f(fake):
     return torch.mean(-fake)
 
 #=======SET UP MODELS AND OPTIMIZERS =======#
-gen = Generator((hop,shape,1))
-siam = Siamese((hop,shape,1))
-critic = Discriminator((hop,3*shape,1))
+gen = Generator((hop,shape,1)).to(device)
+siam = Siamese((hop,shape,1)).to(device)
+critic = Discriminator((hop,3*shape,1)).to(device)
 
 #Generator loss is a function of 
 params = list(gen.parameters()) + list(siam.parameters())
 opt_gen = optim.Adam(params, lr=1e-5)
 
-opt_disc = optim.Adam(critic.parameters(), lr=1e-5)
+opt_disc = optim.SGD(critic.parameters(), lr=1e-5)
 
 #Set learning rate
-def update_lr(lr):
-    opt_gen.lr = lr
-    opt_disc.lr = lr
+def update_lr(gen_lr, dis_lr):
+    opt_gen.lr = gen_lr
+    opt_disc.lr = dis_lr
 
 #functions to be written here
 def train_all(a,b):
@@ -633,12 +635,11 @@ def train_all(a,b):
     
     bb,bb2,bb3 = extract_image(b)
 
-    gen.zero_grad()
-    critic.zero_grad()
-    siam.zero_grad()
+    #gen.zero_grad()
+    #critic.zero_grad()
+    #siam.zero_grad()
     
     opt_gen.zero_grad()
-    opt_disc.zero_grad()
 
     #translating A to B
     fab = gen.forward(aa)
@@ -679,11 +680,13 @@ def train_all(a,b):
     opt_gen.step()
     
     #get critic loss and bptt
+    opt_disc.zero_grad()
+
     loss_dr = d_loss_r(cb)
     loss_df = d_loss_f(cab)
     loss_d = (loss_dr+loss_df)/2.
+
     print("Loss d: ", loss_d)
-    # loss_d = torch.autograd.Variable(loss_d, requires_grad = True)
     loss_d.backward()
     opt_disc.step()
     
@@ -716,9 +719,9 @@ def train_d(a,b):
 
     return loss_dr,loss_df
 
-def train(epochs, batch_size=16, lr=0.0001, n_save=6, gupt=5):
+def train(epochs, batch_size=16, gen_lr=1e-5, dis_lr=1e-5, n_save=6, gupt=5):
   
-    update_lr(lr)
+    update_lr(gen_lr, dis_lr)
     df_list = []
     dr_list = []
     g_list = []
@@ -752,7 +755,7 @@ def train(epochs, batch_size=16, lr=0.0001, n_save=6, gupt=5):
 
         c = 0
         
-train(epochs=1, batch_size=bs, lr=1e-5, n_save=1, gupt=3)
+train(epochs=1, batch_size=bs, gen_lr=1e-6, dis_lr=1e-7)
 
 #After Training, use these functions to convert data with the generator and save the results
 
@@ -789,9 +792,9 @@ def chopspec(spec):
 #Converting from source Spectrogram to target Spectrogram
 def towave(spec, name, path='../content/', show=True):
     specarr = chopspec(spec)
-    a = torch.Tensor(specarr).permute(0,3,1,2)
-    ab = gen(a).detach().numpy()
-    a = specass(a,spec)
+    a = torch.Tensor(specarr).permute(0,3,1,2).to(device)
+    ab = gen(a).detach().cpu().numpy()
+    a = specass(a.cpu(),spec)
     ab = specass(ab,spec)
     print("out of specass")
     awv = deprep(a)
