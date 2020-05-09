@@ -77,14 +77,14 @@ def melspecfunc(waveform):
 def spectral_convergence(input, target):
     return 20 * ((input - target).norm().log10() - target.norm().log10())
 
-def GRAD(spec, transform_fn, samples=None, init_x0=None, maxiter=1000, tol=1e-6, verbose=1, evaiter=10, lr=0.003):
+def GRAD(spec, transform_fn, samples=None, init_x0=None, maxiter=100, tol=1e-6, verbose=1, evaiter=10, lr=0.003):
 
-    spec = torch.Tensor(spec).to(device)
+    spec = torch.Tensor(spec).to('cpu')
     samples = (spec.shape[-1]*hop)-hop
 
     if init_x0 is None:
-        init_x0 = spec.new_empty((1,samples)).normal_(std=1e-6).to(device)
-    x = nn.Parameter(init_x0).to(device)
+        init_x0 = spec.new_empty((1,samples)).normal_(std=1e-6)
+    x = nn.Parameter(init_x0)
     T = spec
 
     criterion = nn.L1Loss()
@@ -128,7 +128,8 @@ def prep(wv,hop=192):
 def deprep(S):
     S = denormalize(S)+ref_level_db
     S = librosa.db_to_power(S)
-    wv = GRAD(np.expand_dims(S,0), melspecfunc, maxiter=2000, evaiter=10, tol=1e-8) ##MAXITER NORMALLY 2000 BUT SET TO 100 FOR TESTING
+    wv = GRAD(np.expand_dims(S,0), melspecfunc, maxiter=100, evaiter=10, tol=1e-8) ##MAXITER NORMALLY 2000 BUT SET TO 100 FOR TESTING
+    print("wv shape: ", wv.shape)
     return np.array(np.squeeze(wv))
 
 #Helper functions
@@ -217,32 +218,13 @@ def splitcut(data):
 #adata: source spectrograms
 #bdata: target spectrograms
 
-#MALE1
-#awv = audio_array('./cmu_us_clb_arctic/wav')   #get waveform array from folder containing wav files
-#aspec = tospec(awv)         #get spectrogram array
-#print("aspec shape: ", aspec.shape)
-#adata = splitcut(aspec)     #split spectrogams to fixed length
-#print("adata shape: ", adata.shape)
-#FEMALE1
-#bwv = audio_array('./cmu_us_bdl_arctic/wav')
-#bspec = tospec(bwv)
-#bdata = splitcut(bspec)
-
-# #MALE2
-# awv = audio_array('../content/cmu_us_rms_arctic/wav')
-# aspec = tospec(awv)
-# adata = splitcut(aspec)
-# #FEMALE2
-# bwv = audio_array('../content/cmu_us_slt_arctic/wav')
-# bspec = tospec(bwv)
-# bdata = splitcut(bspec)
-
 #JAZZ MUSIC
-awv = audio_array('../content/genres/jazz')
+awv = audio_array('../content/genres/classical')
 aspec = tospec(awv)
 adata = splitcut(aspec)
+
 #CLASSICAL MUSIC
-bwv = audio_array('../content/genres/classical')
+bwv = audio_array('../content/genres/jazz')
 bspec = tospec(bwv)
 bdata = splitcut(bspec)
 
@@ -275,7 +257,8 @@ class ConvSN2D(nn.Conv2d):
         
         self.u = torch.nn.Parameter(data=torch.zeros((1,self.weight.shape[-1]))
                                          ,requires_grad=False)
-        
+        torch.nn.init.normal_(self.u.data, mean=0.5, std=0.5)
+
         self.u.data.uniform_(0, 1)
     
     def compute_spectral_norm(self, W, new_u, W_shape):
@@ -322,7 +305,8 @@ class ConvSN2DTranspose(nn.ConvTranspose2d):
         
         self.u = torch.nn.Parameter(data=torch.zeros((1,self.weight.shape[-1]))
                                          ,requires_grad=False)
-        
+        torch.nn.init.normal_(self.u.data, mean=0.5, std=0.5)
+
         self.u.data.uniform_(0, 1)
     
     def compute_spectral_norm(self, W, new_u, W_shape):
@@ -373,6 +357,7 @@ class DenseSN(nn.Linear):
         
         self.u = torch.nn.Parameter(data=torch.zeros((1,self.weight.shape[-1]))
                                          ,requires_grad=False)
+        torch.nn.init.normal_(self.u.data, mean=0.5, std=0.5)
         
         self.u.data.uniform_(0, 1)
     
@@ -495,11 +480,7 @@ class Siamese(nn.Module):
         #New kernel = (1,9)
         pad_h = ((x.shape[2]-1)*1 - x.shape[2] + 1) // 2
         pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 9) // 2
-        print(x.shape)
-        print(pad_h)
-        print(pad_w)
         x = F.pad(x, (pad_h, pad_w))
-        print(x.shape)
         x = self.g2(x)
         x = self.batchnorm(self.leaky(x))
 
@@ -507,15 +488,12 @@ class Siamese(nn.Module):
         #New kernel = (1,7)
         pad_h = ((x.shape[2]-1)*1 - x.shape[2] + 1) // 2
         pad_w = ((x.shape[3]-1)*2 - x.shape[3] + 7) // 2
-        print(x.shape)
-        print(pad_h)
-        print(pad_w)
         x = F.pad(x, (pad_h, pad_w))
-        print(x.shape)
         x = self.g3(x)
         x = self.batchnorm(self.leaky(x))
 
-        x = self.g4(x.view(x.shape[0],-1))
+        x = x.view(x.shape[0],-1)
+        x = self.g4(x)
         return x
     
 class Discriminator(nn.Module):
@@ -676,7 +654,10 @@ def train_all(a,b):
     print("Loss g: ", loss_g)
     lossgtot = loss_g+10.*loss_m #+0.5*loss_id #CHANGE LOSS WEIGHTS HERE  (COMMENT OUT +w*loss_id IF THE IDENTITY LOSS TERM IS NOT NEEDED)
 
-    lossgtot.mean().backward()
+    lossgtot.backward()
+    #for idx, i in enumerate(params):
+    #    print("Param ", idx, ":")
+    #    print(i.grad)
     opt_gen.step()
     
     #get critic loss and bptt
@@ -688,6 +669,9 @@ def train_all(a,b):
 
     print("Loss d: ", loss_d)
     loss_d.backward()
+    #for idx, i in enumerate(critic.parameters()):
+    #    print("Param ", idx, ":")
+    #    print(i.grad)
     opt_disc.step()
     
     return loss_dr,loss_df,loss_g,loss_d
@@ -790,7 +774,7 @@ def chopspec(spec):
     return np.array(dsa, dtype=np.float32)
 
 #Converting from source Spectrogram to target Spectrogram
-def towave(spec, name, path='../content/', show=True):
+def towave(spec, name, path='../content/', show=False):
     specarr = chopspec(spec)
     a = torch.Tensor(specarr).permute(0,3,1,2).to(device)
     ab = gen(a).detach().cpu().numpy()
@@ -800,8 +784,8 @@ def towave(spec, name, path='../content/', show=True):
     awv = deprep(a)
     abwv = deprep(ab)
     print("out of deprep")
-    sf.write('AB.wav', abwv, sr)
-    sf.write('A.wav', awv, sr)
+    sf.write('AB_' + str(name) + '.wav', abwv, sr)
+    sf.write('A_' + str(name) + '.wav', awv, sr)
     IPython.display.display(IPython.display.Audio(np.squeeze(abwv), rate=sr))
     IPython.display.display(IPython.display.Audio(np.squeeze(awv), rate=sr))
     if show:
@@ -817,13 +801,14 @@ def towave(spec, name, path='../content/', show=True):
 
 #Wav to wav conversion
 
-wv, sr = librosa.load(librosa.util.example_audio_file(), sr=16000)  #Load waveform
-print(wv.shape)
-speca = prep(wv)                                                    #Waveform to Spectrogram
+for i in range(10):
+    file_path = '../content/genres/classical/classical.0000' + str(i) + '.wav'
+    wv, sr = librosa.load(file_path, sr=16000)
+    speca = prep(wv)                                                    #Waveform to Spectrogram
 
-plt.figure(figsize=(50,1))                                          #Show Spectrogram
-plt.imshow(np.flip(speca, axis=0), cmap=None)
-plt.axis('off')
-plt.show()
+    plt.figure(figsize=(50,1))                                          #Show Spectrogram
+    plt.imshow(np.flip(speca, axis=0), cmap=None)
+    plt.axis('off')
+    plt.show()
 
-abwv = towave(speca, name='FILENAME1', path='')           #Convert and save wav
+    abwv = towave(speca, name=i, path='')           #Convert and save wav
